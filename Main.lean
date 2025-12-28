@@ -4,6 +4,7 @@
 
 import Parlance
 import Oracle
+import Wisp
 
 open Parlance
 open Oracle
@@ -73,10 +74,13 @@ def main (args : List String) : IO UInt32 := do
 
     -- Create client and send request
     let client := Client.withModel apiKey model
-    match ← client.promptStream prompt with
-    | .ok _ =>
-      IO.println ""  -- Newline after streamed content
-      return 0
-    | .error e =>
-      printError s!"API error: {e}"
-      return 1
+    let exitCode ← match ← client.promptStream prompt with
+      | .ok _ =>
+        IO.println ""  -- Newline after streamed content
+        pure (0 : UInt32)
+      | .error e =>
+        printError s!"API error: {e}"
+        pure (1 : UInt32)
+    -- Shutdown the HTTP client manager to allow clean exit
+    Wisp.HTTP.Client.shutdown
+    return exitCode
