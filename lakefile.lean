@@ -6,6 +6,7 @@ package ask where
 
 require parlance from ".." / "parlance"
 require oracle from ".." / "oracle"
+require chronicle from ".." / "chronicle"
 
 -- Platform-specific curl library paths (required by wisp via oracle)
 def curlLinkArgs : Array String :=

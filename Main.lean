@@ -6,6 +6,7 @@ import Parlance
 import Parlance.Repl
 import Oracle
 import Wisp
+import Chronicle
 
 open Parlance
 open Oracle
@@ -33,10 +34,26 @@ def cmd : Command := command "ask" do
   Cmd.flag "system" (short := some 's')
     (argType := .string)
     (description := "System prompt to use")
+  Cmd.flag "log"
+    (argType := .string)
+    (description := "Enable logging to file (e.g., ~/.ask/ask.log)")
+  Cmd.flag "log-level"
+    (argType := .string)
+    (description := "Log level: trace, debug, info, warn, error (default: info)")
   Cmd.boolFlag "list-models" (short := some 'l')
     (description := "List common model names")
   Cmd.arg "prompt" (argType := .string) (required := false)
     (description := "The prompt to send")
+
+/-- Parse log level string to Chronicle.Level -/
+def parseLogLevel (s : Option String) : Chronicle.Level :=
+  match s with
+  | some "trace" => .trace
+  | some "debug" => .debug
+  | some "info" => .info
+  | some "warn" => .warn
+  | some "error" => .error
+  | _ => .info  -- default
 
 /-- REPL state for multi-turn conversations -/
 structure ReplState where
@@ -106,7 +123,12 @@ def handleSlashCommand (state : ReplState) (cmd : String) : IO (ReplState × Boo
     pure (state, false)
 
 /-- Run the interactive REPL loop -/
-partial def runRepl (client : Client) (systemPrompt : Option String) (model : String) : IO Unit := do
+partial def runRepl (client : Client) (systemPrompt : Option String) (model : String)
+    (logger : Option Chronicle.Logger := none) : IO Unit := do
+  -- Log REPL start
+  if let some l := logger then
+    l.info s!"Interactive mode started (model: {model})"
+
   -- Initialize history with system prompt if provided
   let initialHistory := match systemPrompt with
     | some sys => #[Message.system sys]
@@ -117,7 +139,7 @@ partial def runRepl (client : Client) (systemPrompt : Option String) (model : St
   printInfo s!"Interactive mode (model: {model})"
   IO.println "Type /help for commands, Ctrl+D to exit.\n"
 
-  Repl.simple "ask> " fun input => do
+  Repl.simple "ask> " logger fun input => do
     let state ← stateRef.get
 
     -- Handle slash commands
@@ -129,19 +151,50 @@ partial def runRepl (client : Client) (systemPrompt : Option String) (model : St
       -- Add user message to history
       let newHistory := state.history.push (Message.user input)
 
+      -- Log the request we're about to send
+      if let some l := logger then
+        l.debug s!"Sending request with {newHistory.size} messages"
+        let mut i := 0
+        for msg in newHistory do
+          let role := match msg.role with
+            | .system => "system"
+            | .user => "user"
+            | .assistant => "assistant"
+            | .tool => "tool"
+            | .developer => "developer"
+          let preview := if msg.content.length > 80 then
+            msg.content.take 80 ++ "..."
+          else
+            msg.content
+          let preview := preview.replace "\n" " "
+          l.trace s!"  [{i}] {role}: {preview}"
+          i := i + 1
+
       -- Send to API
       match ← state.client.completeStream newHistory with
       | .ok stream =>
-        -- Stream and collect response
-        let response ← stream.printContent
-        IO.println ""  -- Blank line for readability
+        -- Stream and collect response (with chunk count for debugging)
+        let (response, chunkCount) ← stream.printContentWithCount
 
-        -- Add assistant response to history
-        let finalHistory := newHistory.push (Message.assistant response)
-        stateRef.set { state with history := finalHistory }
+        -- Log the result
+        if let some l := logger then
+          l.debug s!"Stream completed: {chunkCount} chunks, {response.length} chars"
+
+        -- Only add non-empty responses to history
+        if response.isEmpty then
+          printWarning s!"Received empty response from API (chunks: {chunkCount})"
+          -- Don't add empty response to history, keep history as-is
+          stateRef.set { state with history := newHistory }
+        else
+          IO.println ""  -- Blank line for readability
+          -- Add assistant response to history
+          let finalHistory := newHistory.push (Message.assistant response)
+          stateRef.set { state with history := finalHistory }
         pure false
 
       | .error e =>
+        if let some l := logger then
+          l.error s!"API error: {e}"
         printError s!"API error: {e}"
         pure false
 
@@ -175,35 +228,63 @@ def main (args : List String) : IO UInt32 := do
     let model := result.getString! "model" defaultModel
     let systemPrompt := result.getString "system"
 
-    -- Create client
-    let client := Client.withModel apiKey model
+    -- Get logging options
+    let logPath := result.getString "log"
+    let logLevel := parseLogLevel (result.getString "log-level")
 
-    -- Interactive mode
-    if result.hasFlag "interactive" then
-      runRepl client systemPrompt model
+    -- Helper to run the actual logic with optional logger
+    let runWithLogger (logger : Option Chronicle.Logger) : IO UInt32 := do
+      -- Log startup
+      if let some l := logger then
+        l.info s!"ask started (model: {model})"
+
+      -- Create client with optional logger
+      let baseClient := Client.withModel apiKey model
+      let client := match logger with
+        | some l => { baseClient with config := baseClient.config.setLogger l }
+        | none => baseClient
+
+      -- Interactive mode
+      if result.hasFlag "interactive" then
+        runRepl client systemPrompt model logger
+        if let some l := logger then
+          l.info "ask exiting"
+        Wisp.HTTP.Client.shutdown
+        return 0
+
+      -- Single-turn mode: Get prompt (from arg or stdin)
+      let prompt ← match result.getString "prompt" with
+        | some p => pure p
+        | none => do
+          -- Read from stdin
+          let stdin ← IO.getStdin
+          let content ← stdin.readToEnd
+          if content.isEmpty then
+            printError "No prompt provided. Use: ask \"your prompt\", pipe to stdin, or use -i for interactive mode"
+            return 1
+          pure content.trim
+
+      -- Send single request
+      let exitCode ← match ← client.promptStream prompt systemPrompt with
+        | .ok _ =>
+          IO.println ""  -- Newline after streamed content
+          pure (0 : UInt32)
+        | .error e =>
+          printError s!"API error: {e}"
+          pure (1 : UInt32)
+
+      if let some l := logger then
+        l.info "ask exiting"
+
+      -- Shutdown the HTTP client manager to allow clean exit
       Wisp.HTTP.Client.shutdown
-      return 0
+      return exitCode
 
-    -- Single-turn mode: Get prompt (from arg or stdin)
-    let prompt ← match result.getString "prompt" with
-      | some p => pure p
-      | none => do
-        -- Read from stdin
-        let stdin ← IO.getStdin
-        let content ← stdin.readToEnd
-        if content.isEmpty then
-          printError "No prompt provided. Use: ask \"your prompt\", pipe to stdin, or use -i for interactive mode"
-          return 1
-        pure content.trim
-
-    -- Send single request
-    let exitCode ← match ← client.promptStream prompt systemPrompt with
-      | .ok _ =>
-        IO.println ""  -- Newline after streamed content
-        pure (0 : UInt32)
-      | .error e =>
-        printError s!"API error: {e}"
-        pure (1 : UInt32)
-    -- Shutdown the HTTP client manager to allow clean exit
-    Wisp.HTTP.Client.shutdown
-    return exitCode
+    -- Run with or without logging
+    match logPath with
+    | some path =>
+      let config := Chronicle.Config.default path |>.withLevel logLevel
+      Chronicle.Logger.withLogger config fun logger => do
+        runWithLogger (some logger)
+    | none =>
+      runWithLogger none
