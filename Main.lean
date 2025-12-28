@@ -10,9 +10,10 @@ import Wisp
 open Parlance
 open Oracle
 
-def defaultModel : String := "anthropic/claude-sonnet-4"
+def defaultModel : String := "google/gemini-3-flash-preview"
 
 def commonModels : List String := [
+  "google/gemini-3-flash-preview",
   "anthropic/claude-sonnet-4",
   "anthropic/claude-haiku",
   "openai/gpt-4o",
