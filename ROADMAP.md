@@ -2,6 +2,24 @@
 
 This document outlines potential improvements, new features, and code cleanup opportunities for the `ask` CLI tool.
 
+## Completed
+
+### ~~Temperature and Max Tokens Configuration~~ (Done)
+- Added `-t, --temperature <FLOAT>` flag (0.0-2.0)
+- Added `--max-tokens <INT>` flag
+- Fixed parlance Float parser to handle decimal values
+- ChatOptions passed to both single-turn and REPL modes
+
+### ~~Extract REPL Logic into Separate Module~~ (Done)
+- Created `Ask/Repl.lean` with State, Config, handleSlashCommand, run
+- Main.lean reduced from ~370 to ~220 lines
+- Added `lean_lib Ask` to lakefile.lean
+
+### ~~Update Documentation in CLAUDE.md~~ (Done)
+- Added full options table
+- Documented interactive mode commands and shortcuts
+- Added features list
+
 ## Feature Proposals
 
 ### [Priority: High] Conversation History Persistence
@@ -15,17 +33,6 @@ This document outlines potential improvements, new features, and code cleanup op
 - Add `/load <filename>` command to load previous history
 - Consider auto-save to a default location (e.g., `~/.ask/history/`)
 - Use JSON format for portability
-
-### [Priority: High] Temperature and Max Tokens Configuration
-**Description:** Add CLI flags for controlling generation parameters like temperature and max tokens.
-**Rationale:** The Oracle library supports these parameters (see `ChatRequest.withTemperature`, `ChatRequest.withMaxTokens`), but ask does not expose them. Power users need control over creativity vs. determinism and response length.
-**Affected Files:** `Main.lean`
-**Estimated Effort:** Small
-**Dependencies:** None
-**Implementation Notes:**
-- Add `--temperature` / `-t` flag (Float, 0.0-2.0)
-- Add `--max-tokens` flag (Nat)
-- Update both single-turn and REPL modes
 
 ### [Priority: High] Code Block Rendering
 **Description:** Extend markdown renderer to properly handle fenced code blocks with optional syntax highlighting.
@@ -140,13 +147,6 @@ This document outlines potential improvements, new features, and code cleanup op
 
 ## Code Improvements
 
-### [Priority: High] Extract REPL Logic into Separate Module
-**Current State:** All REPL logic (state, slash commands, loop) is in `Main.lean`, making it 358 lines.
-**Proposed Change:** Extract `ReplState`, `handleSlashCommand`, `runRepl`, and related code into a dedicated `Ask/Repl.lean` module.
-**Benefits:** Better separation of concerns, easier testing, more maintainable code.
-**Affected Files:** `Main.lean` (split into `Main.lean` and `Ask/Repl.lean`)
-**Estimated Effort:** Small
-
 ### [Priority: High] Consistent Error Handling Pattern
 **Current State:** Error handling mixes printError calls with return codes in different patterns.
 **Proposed Change:** Create a consistent error handling monad or pattern that handles logging, printing, and exit codes uniformly.
@@ -169,24 +169,13 @@ This document outlines potential improvements, new features, and code cleanup op
 **Estimated Effort:** Small
 
 ### [Priority: Low] Type-Safe Command Dispatch
-**Current State:** `handleSlashCommand` uses string pattern matching on command names (lines 130-172).
+**Current State:** `handleSlashCommand` in `Ask/Repl.lean` uses string pattern matching on command names.
 **Proposed Change:** Define an inductive type for REPL commands and parse into that type before dispatch.
 **Benefits:** Compiler-checked exhaustiveness, easier to add new commands, better documentation.
-**Affected Files:** `Main.lean`
+**Affected Files:** `Ask/Repl.lean`
 **Estimated Effort:** Small
 
 ## Code Cleanup
-
-### [Priority: High] Update Documentation in CLAUDE.md
-**Issue:** CLAUDE.md doesn't document all current features (markdown rendering, word wrapping, REPL mode, logging).
-**Location:** `/Users/Shared/Projects/lean-workspace/ask/CLAUDE.md`
-**Action Required:** Update usage examples to include all flags and features:
-- Interactive mode (`-i`)
-- Raw mode (`-r`)
-- Width control (`-w`)
-- Logging (`--log`, `--log-level`)
-- System prompt (`-s`)
-**Estimated Effort:** Small
 
 ### [Priority: Medium] Add Tests
 **Issue:** The ask project has no test suite despite depending on crucible.
@@ -199,8 +188,8 @@ This document outlines potential improvements, new features, and code cleanup op
 **Estimated Effort:** Medium
 
 ### [Priority: Medium] Partial Function Annotation
-**Issue:** `printStreamMarkdown` (line 16) and `runRepl` (line 175) are marked `partial` due to their use of streaming/looping, which is appropriate.
-**Location:** `Main.lean` lines 16, 175
+**Issue:** `printStreamMarkdown` in `Main.lean` and `run` in `Ask/Repl.lean` are marked `partial` due to their use of streaming/looping, which is appropriate.
+**Location:** `Main.lean`, `Ask/Repl.lean`
 **Action Required:** Document why these functions are partial (infinite streams, REPL loop) for future maintainers. Consider if termination proofs are possible.
 **Estimated Effort:** Small
 

@@ -25,6 +25,9 @@ def curlLinkArgs : Array String :=
   else
     #["-lcurl", "-Wl,-rpath,/usr/lib", "-Wl,-rpath,/usr/local/lib"]
 
+lean_lib Ask where
+  globs := #[.submodules `Ask]
+
 @[default_target]
 lean_exe ask where
   root := `Main

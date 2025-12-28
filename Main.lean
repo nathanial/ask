@@ -3,10 +3,10 @@
 -/
 
 import Parlance
-import Parlance.Repl
 import Oracle
 import Wisp
 import Chronicle
+import Ask.Repl
 
 open Parlance
 open Oracle
@@ -91,6 +91,12 @@ def cmd : Command := command "ask" do
   Cmd.flag "width" (short := some 'w')
     (argType := .int)
     (description := "Wrap lines at specified width (default: 80, 0 to disable)")
+  Cmd.flag "temperature" (short := some 't')
+    (argType := .float)
+    (description := "Sampling temperature (0.0-2.0, default: model default)")
+  Cmd.flag "max-tokens"
+    (argType := .int)
+    (description := "Maximum tokens in response")
   Cmd.arg "prompt" (argType := .string) (required := false)
     (description := "The prompt to send")
 
@@ -103,153 +109,6 @@ def parseLogLevel (s : Option String) : Chronicle.Level :=
   | some "warn" => .warn
   | some "error" => .error
   | _ => .info  -- default
-
-/-- REPL state for multi-turn conversations -/
-structure ReplState where
-  client : Client
-  history : Array Message
-  model : String
-
-/-- REPL help text -/
-def replHelpText : String :=
-  "Commands:\n" ++
-  "  /quit, /exit, /q  - Exit the REPL\n" ++
-  "  /clear            - Clear conversation history\n" ++
-  "  /model <name>     - Switch to a different model\n" ++
-  "  /history          - Show conversation history\n" ++
-  "  /help, /?         - Show this help\n" ++
-  "\n" ++
-  "Editing shortcuts:\n" ++
-  "  Ctrl+A/E          - Start/end of line\n" ++
-  "  Ctrl+K            - Delete to end\n" ++
-  "  Ctrl+U            - Delete to start\n" ++
-  "  Ctrl+W            - Delete word\n" ++
-  "  Ctrl+D            - Exit (on empty line)"
-
-/-- Handle a slash command. Returns (new state, should exit) -/
-def handleSlashCommand (state : ReplState) (cmd : String) : IO (ReplState × Bool) := do
-  let parts := cmd.splitOn " "
-  match parts.head? with
-  | some "/quit" | some "/exit" | some "/q" =>
-    IO.println "Goodbye!"
-    pure (state, true)
-  | some "/clear" =>
-    -- Keep system message if present
-    let newHistory := state.history.filter (·.role == .system)
-    printSuccess "Conversation cleared."
-    pure ({ state with history := newHistory }, false)
-  | some "/model" =>
-    match parts[1]? with
-    | some newModel =>
-      let newConfig := { state.client.config with model := newModel }
-      let newClient := { state.client with config := newConfig }
-      printSuccess s!"Model changed to: {newModel}"
-      pure ({ state with client := newClient, model := newModel }, false)
-    | none =>
-      printInfo s!"Current model: {state.model}"
-      pure (state, false)
-  | some "/history" =>
-    if state.history.isEmpty then
-      printInfo "No conversation history."
-    else
-      for msg in state.history do
-        let role := match msg.role with
-          | .system => "system"
-          | .user => "user"
-          | .assistant => "assistant"
-          | .tool => "tool"
-          | .developer => "developer"
-        let content := if msg.content.length > 100 then
-          msg.content.take 100 ++ "..."
-        else msg.content
-        IO.println s!"[{role}] {content}"
-    pure (state, false)
-  | some "/help" | some "/?" =>
-    IO.println replHelpText
-    pure (state, false)
-  | _ =>
-    printWarning s!"Unknown command: {cmd}. Type /help for commands."
-    pure (state, false)
-
-/-- Run the interactive REPL loop -/
-partial def runRepl (client : Client) (systemPrompt : Option String) (model : String)
-    (rawMode : Bool := false) (wrapWidth : Option Nat := none)
-    (logger : Option Chronicle.Logger := none) : IO Unit := do
-  -- Log REPL start
-  if let some l := logger then
-    l.info s!"Interactive mode started (model: {model})"
-
-  -- Initialize history with system prompt if provided
-  let initialHistory := match systemPrompt with
-    | some sys => #[Message.system sys]
-    | none => #[]
-
-  let stateRef ← IO.mkRef (ReplState.mk client initialHistory model)
-
-  printInfo s!"Interactive mode (model: {model})"
-  IO.println "Type /help for commands, Ctrl+D to exit.\n"
-
-  Repl.simple "ask> " logger fun input => do
-    let state ← stateRef.get
-
-    -- Handle slash commands
-    if input.startsWith "/" then
-      let (newState, shouldExit) ← handleSlashCommand state input.trim
-      stateRef.set newState
-      pure shouldExit
-    else
-      -- Add user message to history
-      let newHistory := state.history.push (Message.user input)
-
-      -- Log the request we're about to send
-      if let some l := logger then
-        l.debug s!"Sending request with {newHistory.size} messages"
-        let mut i := 0
-        for msg in newHistory do
-          let role := match msg.role with
-            | .system => "system"
-            | .user => "user"
-            | .assistant => "assistant"
-            | .tool => "tool"
-            | .developer => "developer"
-          let preview := if msg.content.length > 80 then
-            msg.content.take 80 ++ "..."
-          else
-            msg.content
-          let preview := preview.replace "\n" " "
-          l.trace s!"  [{i}] {role}: {preview}"
-          i := i + 1
-
-      -- Send to API
-      match ← state.client.completeStream newHistory with
-      | .ok stream =>
-        -- Stream and collect response (with chunk count for debugging)
-        let (response, chunkCount) ← if rawMode then
-          stream.printContentWithCount
-        else
-          printStreamMarkdown stream wrapWidth
-
-        -- Log the result
-        if let some l := logger then
-          l.debug s!"Stream completed: {chunkCount} chunks, {response.length} chars"
-
-        -- Only add non-empty responses to history
-        if response.isEmpty then
-          printWarning s!"Received empty response from API (chunks: {chunkCount})"
-          -- Don't add empty response to history, keep history as-is
-          stateRef.set { state with history := newHistory }
-        else
-          IO.println ""  -- Blank line for readability
-          -- Add assistant response to history
-          let finalHistory := newHistory.push (Message.assistant response)
-          stateRef.set { state with history := finalHistory }
-        pure false
-
-      | .error e =>
-        if let some l := logger then
-          l.error s!"API error: {e}"
-        printError s!"API error: {e}"
-        pure false
 
 def main (args : List String) : IO UInt32 := do
   -- Handle shell completion
@@ -303,9 +162,25 @@ def main (args : List String) : IO UInt32 := do
         | some w => if w.toNat == 0 then none else some w.toNat
         | none => some 80  -- Default to 80 columns
 
+      -- Build chat options from flags
+      let chatOpts : ChatOptions := {
+        temperature := result.getFloat "temperature"
+        maxTokens := result.getInt "max-tokens" |>.map Int.toNat
+      }
+
       -- Interactive mode
       if result.hasFlag "interactive" then
-        runRepl client systemPrompt model rawMode wrapWidth logger
+        let replConfig : Ask.Repl.Config := {
+          client := client
+          systemPrompt := systemPrompt
+          model := model
+          rawMode := rawMode
+          wrapWidth := wrapWidth
+          chatOpts := chatOpts
+          logger := logger
+          printStream := fun stream width => printStreamMarkdown stream width
+        }
+        Ask.Repl.run replConfig
         if let some l := logger then
           l.info "ask exiting"
         Wisp.HTTP.Client.shutdown
@@ -329,7 +204,7 @@ def main (args : List String) : IO UInt32 := do
         | none => #[Message.user prompt]
 
       -- Send single request
-      let exitCode ← match ← client.completeStream messages with
+      let exitCode ← match ← client.completeStream messages chatOpts with
         | .ok stream =>
           if rawMode then
             let _ ← stream.printContent
