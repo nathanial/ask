@@ -11,6 +11,32 @@ import Chronicle
 open Parlance
 open Oracle
 
+/-- Print streaming content with markdown rendering.
+    Returns (raw content, chunk count) for history and debugging. -/
+partial def printStreamMarkdown (stream : ChatStream) : IO (String × Nat) := do
+  let stateRef ← IO.mkRef Markdown.State.new
+  let contentRef ← IO.mkRef ""
+  let countRef ← IO.mkRef 0
+  let stdout ← IO.getStdout
+  stream.forEach fun chunk => do
+    countRef.modify (· + 1)
+    if let some content := chunk.content then
+      -- Accumulate raw content for history
+      contentRef.modify (· ++ content)
+      -- Feed through markdown parser and print styled output
+      let mdState ← stateRef.get
+      let (newState, output) := Markdown.feed mdState content
+      stateRef.set newState
+      IO.print output
+      stdout.flush
+  -- Flush any remaining markdown buffer
+  let finalState ← stateRef.get
+  IO.print (Markdown.finish finalState)
+  IO.println ""
+  let content ← contentRef.get
+  let count ← countRef.get
+  pure (content, count)
+
 def defaultModel : String := "google/gemini-3-flash-preview"
 
 def commonModels : List String := [
@@ -42,6 +68,8 @@ def cmd : Command := command "ask" do
     (description := "Log level: trace, debug, info, warn, error (default: info)")
   Cmd.boolFlag "list-models" (short := some 'l')
     (description := "List common model names")
+  Cmd.boolFlag "raw" (short := some 'r')
+    (description := "Disable markdown rendering (output raw text)")
   Cmd.arg "prompt" (argType := .string) (required := false)
     (description := "The prompt to send")
 
@@ -124,7 +152,7 @@ def handleSlashCommand (state : ReplState) (cmd : String) : IO (ReplState × Boo
 
 /-- Run the interactive REPL loop -/
 partial def runRepl (client : Client) (systemPrompt : Option String) (model : String)
-    (logger : Option Chronicle.Logger := none) : IO Unit := do
+    (rawMode : Bool := false) (logger : Option Chronicle.Logger := none) : IO Unit := do
   -- Log REPL start
   if let some l := logger then
     l.info s!"Interactive mode started (model: {model})"
@@ -174,7 +202,10 @@ partial def runRepl (client : Client) (systemPrompt : Option String) (model : St
       match ← state.client.completeStream newHistory with
       | .ok stream =>
         -- Stream and collect response (with chunk count for debugging)
-        let (response, chunkCount) ← stream.printContentWithCount
+        let (response, chunkCount) ← if rawMode then
+          stream.printContentWithCount
+        else
+          printStreamMarkdown stream
 
         -- Log the result
         if let some l := logger then
@@ -244,9 +275,12 @@ def main (args : List String) : IO UInt32 := do
         | some l => { baseClient with config := baseClient.config.setLogger l }
         | none => baseClient
 
+      -- Check raw mode flag
+      let rawMode := result.hasFlag "raw"
+
       -- Interactive mode
       if result.hasFlag "interactive" then
-        runRepl client systemPrompt model logger
+        runRepl client systemPrompt model rawMode logger
         if let some l := logger then
           l.info "ask exiting"
         Wisp.HTTP.Client.shutdown
@@ -264,10 +298,18 @@ def main (args : List String) : IO UInt32 := do
             return 1
           pure content.trim
 
+      -- Build messages
+      let messages := match systemPrompt with
+        | some sys => #[Message.system sys, Message.user prompt]
+        | none => #[Message.user prompt]
+
       -- Send single request
-      let exitCode ← match ← client.promptStream prompt systemPrompt with
-        | .ok _ =>
-          IO.println ""  -- Newline after streamed content
+      let exitCode ← match ← client.completeStream messages with
+        | .ok stream =>
+          if rawMode then
+            let _ ← stream.printContent
+          else
+            let _ ← printStreamMarkdown stream
           pure (0 : UInt32)
         | .error e =>
           printError s!"API error: {e}"
