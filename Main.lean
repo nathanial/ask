@@ -11,10 +11,12 @@ import Chronicle
 open Parlance
 open Oracle
 
-/-- Print streaming content with markdown rendering.
+/-- Print streaming content with markdown rendering and optional word wrapping.
     Returns (raw content, chunk count) for history and debugging. -/
-partial def printStreamMarkdown (stream : ChatStream) : IO (String × Nat) := do
-  let stateRef ← IO.mkRef Markdown.State.new
+partial def printStreamMarkdown (stream : ChatStream) (wrapWidth : Option Nat := none)
+    : IO (String × Nat) := do
+  let mdStateRef ← IO.mkRef Markdown.State.new
+  let wrapStateRef ← IO.mkRef (wrapWidth.map fun w => Wrap.State.new w)
   let contentRef ← IO.mkRef ""
   let countRef ← IO.mkRef 0
   let stdout ← IO.getStdout
@@ -23,15 +25,31 @@ partial def printStreamMarkdown (stream : ChatStream) : IO (String × Nat) := do
     if let some content := chunk.content then
       -- Accumulate raw content for history
       contentRef.modify (· ++ content)
-      -- Feed through markdown parser and print styled output
-      let mdState ← stateRef.get
-      let (newState, output) := Markdown.feed mdState content
-      stateRef.set newState
+      -- Feed through markdown parser
+      let mdState ← mdStateRef.get
+      let (newMdState, styledOutput) := Markdown.feed mdState content
+      mdStateRef.set newMdState
+      -- Optionally wrap the styled output
+      let wrapState? ← wrapStateRef.get
+      let output ← match wrapState? with
+        | some wrapState =>
+          let (newWrapState, wrapped) := Wrap.feed wrapState styledOutput
+          wrapStateRef.set (some newWrapState)
+          pure wrapped
+        | none => pure styledOutput
       IO.print output
       stdout.flush
-  -- Flush any remaining markdown buffer
-  let finalState ← stateRef.get
-  IO.print (Markdown.finish finalState)
+  -- Flush remaining markdown buffer
+  let finalMdState ← mdStateRef.get
+  let styledRemainder := Markdown.finish finalMdState
+  -- Flush remaining wrap buffer
+  let wrapState? ← wrapStateRef.get
+  let finalOutput := match wrapState? with
+    | some wrapState =>
+      let (finalWrapState, wrapped) := Wrap.feed wrapState styledRemainder
+      wrapped ++ Wrap.finish finalWrapState
+    | none => styledRemainder
+  IO.print finalOutput
   IO.println ""
   let content ← contentRef.get
   let count ← countRef.get
@@ -70,6 +88,9 @@ def cmd : Command := command "ask" do
     (description := "List common model names")
   Cmd.boolFlag "raw" (short := some 'r')
     (description := "Disable markdown rendering (output raw text)")
+  Cmd.flag "width" (short := some 'w')
+    (argType := .int)
+    (description := "Wrap lines at specified width (default: 80, 0 to disable)")
   Cmd.arg "prompt" (argType := .string) (required := false)
     (description := "The prompt to send")
 
@@ -152,7 +173,8 @@ def handleSlashCommand (state : ReplState) (cmd : String) : IO (ReplState × Boo
 
 /-- Run the interactive REPL loop -/
 partial def runRepl (client : Client) (systemPrompt : Option String) (model : String)
-    (rawMode : Bool := false) (logger : Option Chronicle.Logger := none) : IO Unit := do
+    (rawMode : Bool := false) (wrapWidth : Option Nat := none)
+    (logger : Option Chronicle.Logger := none) : IO Unit := do
   -- Log REPL start
   if let some l := logger then
     l.info s!"Interactive mode started (model: {model})"
@@ -205,7 +227,7 @@ partial def runRepl (client : Client) (systemPrompt : Option String) (model : St
         let (response, chunkCount) ← if rawMode then
           stream.printContentWithCount
         else
-          printStreamMarkdown stream
+          printStreamMarkdown stream wrapWidth
 
         -- Log the result
         if let some l := logger then
@@ -275,12 +297,15 @@ def main (args : List String) : IO UInt32 := do
         | some l => { baseClient with config := baseClient.config.setLogger l }
         | none => baseClient
 
-      -- Check raw mode flag
+      -- Check raw mode and wrap width flags
       let rawMode := result.hasFlag "raw"
+      let wrapWidth : Option Nat := match result.getInt "width" with
+        | some w => if w.toNat == 0 then none else some w.toNat
+        | none => some 80  -- Default to 80 columns
 
       -- Interactive mode
       if result.hasFlag "interactive" then
-        runRepl client systemPrompt model rawMode logger
+        runRepl client systemPrompt model rawMode wrapWidth logger
         if let some l := logger then
           l.info "ask exiting"
         Wisp.HTTP.Client.shutdown
@@ -309,7 +334,7 @@ def main (args : List String) : IO UInt32 := do
           if rawMode then
             let _ ← stream.printContent
           else
-            let _ ← printStreamMarkdown stream
+            let _ ← printStreamMarkdown stream wrapWidth
           pure (0 : UInt32)
         | .error e =>
           printError s!"API error: {e}"
