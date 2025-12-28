@@ -67,9 +67,10 @@ def handleSlashCommand (state : State) (cmd : String) : IO (State × Bool) := do
           | .assistant => "assistant"
           | .tool => "tool"
           | .developer => "developer"
-        let content := if msg.content.length > 100 then
-          msg.content.take 100 ++ "..."
-        else msg.content
+        let contentStr := msg.content.asString
+        let content := if contentStr.length > 100 then
+          contentStr.take 100 ++ "..."
+        else contentStr
         IO.println s!"[{role}] {content}"
     pure (state, false)
   | some "/help" | some "/?" =>
@@ -131,10 +132,11 @@ partial def run (cfg : Config) : IO Unit := do
             | .assistant => "assistant"
             | .tool => "tool"
             | .developer => "developer"
-          let preview := if msg.content.length > 80 then
-            msg.content.take 80 ++ "..."
+          let msgStr := msg.content.asString
+          let preview := if msgStr.length > 80 then
+            msgStr.take 80 ++ "..."
           else
-            msg.content
+            msgStr
           let preview := preview.replace "\n" " "
           l.trace s!"  [{i}] {role}: {preview}"
           i := i + 1
