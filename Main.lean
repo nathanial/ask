@@ -55,7 +55,7 @@ partial def printStreamMarkdown (stream : ChatStream) (wrapWidth : Option Nat :=
   let count ← countRef.get
   pure (content, count)
 
-def defaultModel : String := "google/gemini-3-flash-preview:online"
+def defaultModel : String := "google/gemini-3-flash-preview"
 
 def commonModels : List String := [
   "google/gemini-3-flash-preview:online",
