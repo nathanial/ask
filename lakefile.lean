@@ -4,9 +4,9 @@ open Lake DSL System
 package ask where
   version := v!"0.1.0"
 
-require parlance from ".." / "parlance"
-require oracle from ".." / "oracle"
-require chronicle from ".." / "chronicle"
+require parlance from git "https://github.com/nathanial/parlance" @ "v0.0.1"
+require oracle from git "https://github.com/nathanial/oracle" @ "v0.0.1"
+require chronicle from git "https://github.com/nathanial/chronicle" @ "v0.0.1"
 
 -- Platform-specific curl library paths (required by wisp via oracle)
 def curlLinkArgs : Array String :=
