@@ -7,6 +7,7 @@ import Oracle
 import Wisp
 import Chronicle
 import Ask.Repl
+import Ask.History
 
 open Parlance
 open Oracle
@@ -97,6 +98,11 @@ def cmd : Command := command "ask" do
   Cmd.flag "max-tokens"
     (argType := .int)
     (description := "Maximum tokens in response")
+  Cmd.boolFlag "no-autosave"
+    (description := "Disable auto-save on exit in interactive mode")
+  Cmd.flag "load" (short := some 'L')
+    (argType := .string)
+    (description := "Load conversation from file at startup (interactive mode)")
   Cmd.arg "prompt" (argType := .string) (required := false)
     (description := "The prompt to send")
 
@@ -170,14 +176,36 @@ def main (args : List String) : IO UInt32 := do
 
       -- Interactive mode
       if result.hasFlag "interactive" then
+        -- Check if loading a conversation
+        let loadPath := result.getString "load"
+        let autoSave := !result.hasFlag "no-autosave"
+
+        -- Try to load existing conversation if specified
+        let (initialHistory, loadedModel, sessionCreatedAt) ← match loadPath with
+          | some filename => do
+            let path ← Ask.History.resolveHistoryPath filename
+            match ← Ask.History.loadConversation path with
+            | .ok conv =>
+              printSuccess s!"Loaded conversation: {conv.messages.size} messages"
+              -- Use loaded model unless user specified one
+              let effectiveModel := if result.getString "model" |>.isSome then model else conv.metadata.model
+              pure (some conv.messages, effectiveModel, some conv.metadata.createdAt)
+            | .error e =>
+              printWarning s!"Failed to load {filename}: {e}. Starting fresh."
+              pure (none, model, none)
+          | none => pure (none, model, none)
+
         let replConfig : Ask.Repl.Config := {
           client := client
           systemPrompt := systemPrompt
-          model := model
+          model := loadedModel
           rawMode := rawMode
           wrapWidth := wrapWidth
           chatOpts := chatOpts
           logger := logger
+          autoSave := autoSave
+          initialHistory := initialHistory
+          sessionCreatedAt := sessionCreatedAt
           printStream := fun stream width => printStreamMarkdown stream width
         }
         Ask.Repl.run replConfig

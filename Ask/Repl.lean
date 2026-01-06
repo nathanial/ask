@@ -6,6 +6,7 @@ import Parlance
 import Parlance.Repl
 import Oracle
 import Chronicle
+import Ask.History
 
 namespace Ask.Repl
 
@@ -17,6 +18,8 @@ structure State where
   client : Client
   history : Array Message
   model : String
+  sessionPath : Option System.FilePath := none  -- Current save file path
+  sessionCreatedAt : Option Nat := none         -- When session started (for metadata)
 
 /-- REPL help text -/
 def helpText : String :=
@@ -25,6 +28,9 @@ def helpText : String :=
   "  /clear            - Clear conversation history\n" ++
   "  /model <name>     - Switch to a different model\n" ++
   "  /history          - Show conversation history\n" ++
+  "  /save [name]      - Save conversation to file\n" ++
+  "  /load [name]      - Load conversation from file\n" ++
+  "  /list             - List saved conversations\n" ++
   "  /help, /?         - Show this help\n" ++
   "\n" ++
   "Editing shortcuts:\n" ++
@@ -35,10 +41,19 @@ def helpText : String :=
   "  Ctrl+D            - Exit (on empty line)"
 
 /-- Handle a slash command. Returns (new state, should exit) -/
-def handleSlashCommand (state : State) (cmd : String) : IO (State × Bool) := do
+def handleSlashCommand (state : State) (cmd : String) (autoSave : Bool := true) : IO (State × Bool) := do
   let parts := cmd.splitOn " "
   match parts.head? with
   | some "/quit" | some "/exit" | some "/q" =>
+    -- Auto-save before exit if enabled and there's meaningful history
+    if autoSave && state.history.size > 1 then  -- More than just system prompt
+      History.ensureHistoryDir
+      let conv ← History.buildConversation state.model state.history state.sessionCreatedAt
+      let filename ← History.generateFilename state.model
+      let path ← History.resolveHistoryPath filename
+      match ← History.saveConversation conv path with
+      | .ok () => printInfo s!"Auto-saved to: {path}"
+      | .error _ => pure ()  -- Silent failure for auto-save
     IO.println "Goodbye!"
     pure (state, true)
   | some "/clear" =>
@@ -73,6 +88,68 @@ def handleSlashCommand (state : State) (cmd : String) : IO (State × Bool) := do
         else contentStr
         IO.println s!"[{role}] {content}"
     pure (state, false)
+
+  | some "/save" =>
+    if state.history.size <= 1 then
+      printWarning "Nothing to save (no conversation history)."
+      pure (state, false)
+    else
+      History.ensureHistoryDir
+      -- Use provided filename or generate one
+      let filename ← match parts[1]? with
+        | some name => pure name
+        | none => History.generateFilename state.model
+      let path ← History.resolveHistoryPath filename
+      let conv ← History.buildConversation state.model state.history state.sessionCreatedAt
+      match ← History.saveConversation conv path with
+      | .ok () =>
+        printSuccess s!"Saved to: {path}"
+        pure ({ state with sessionPath := some path }, false)
+      | .error e =>
+        printError s!"Save failed: {e}"
+        pure (state, false)
+
+  | some "/load" =>
+    match parts[1]? with
+    | some filename =>
+      let path ← History.resolveHistoryPath filename
+      match ← History.loadConversation path with
+      | .ok conv =>
+        printSuccess s!"Loaded {conv.messages.size} messages from {filename}"
+        pure ({
+          state with
+          history := conv.messages
+          model := conv.metadata.model
+          sessionPath := some path
+          sessionCreatedAt := some conv.metadata.createdAt
+        }, false)
+      | .error e =>
+        printError s!"Load failed: {e}"
+        pure (state, false)
+    | none =>
+      -- Show available files
+      let files ← History.listHistoryFiles
+      if files.isEmpty then
+        printInfo "No saved conversations. Use /save to save the current conversation."
+      else
+        printInfo "Available conversations (use /load <filename>):"
+        for info in files do
+          IO.println s!"  {info.filename}"
+          IO.println s!"    Model: {info.model}, Messages: {info.messageCount}"
+      pure (state, false)
+
+  | some "/list" =>
+    let files ← History.listHistoryFiles
+    if files.isEmpty then
+      printInfo "No saved conversations in ~/.ask/history/"
+    else
+      printInfo "Saved conversations:"
+      for info in files do
+        IO.println s!"  {info.filename}"
+        IO.println s!"    Model: {info.model}"
+        IO.println s!"    Messages: {info.messageCount}"
+    pure (state, false)
+
   | some "/help" | some "/?" =>
     IO.println helpText
     pure (state, false)
@@ -89,6 +166,9 @@ structure Config where
   wrapWidth : Option Nat := none
   chatOpts : ChatOptions := {}
   logger : Option Chronicle.Logger := none
+  autoSave : Bool := true  -- Auto-save conversation on exit
+  initialHistory : Option (Array Message) := none  -- Load from saved conversation
+  sessionCreatedAt : Option Nat := none  -- When session started (for loaded conversations)
   /-- Function to print streaming content with optional markdown/wrapping.
       Returns (raw content, chunk count). -/
   printStream : ChatStream → Option Nat → IO (String × Nat)
@@ -99,12 +179,25 @@ partial def run (cfg : Config) : IO Unit := do
   if let some l := cfg.logger then
     l.info s!"Interactive mode started (model: {cfg.model})"
 
-  -- Initialize history with system prompt if provided
-  let initialHistory := match cfg.systemPrompt with
-    | some sys => #[Message.system sys]
-    | none => #[]
+  -- Use provided initial history or create from system prompt
+  let initialHistory := match cfg.initialHistory with
+    | some hist => hist
+    | none => match cfg.systemPrompt with
+      | some sys => #[Message.system sys]
+      | none => #[]
 
-  let stateRef ← IO.mkRef (State.mk cfg.client initialHistory cfg.model)
+  -- Use provided session time or get current time
+  let sessionCreatedAt ← match cfg.sessionCreatedAt with
+    | some t => pure t
+    | none => History.nowSeconds
+
+  let stateRef ← IO.mkRef {
+    client := cfg.client
+    history := initialHistory
+    model := cfg.model
+    sessionPath := none
+    sessionCreatedAt := some sessionCreatedAt
+  }
 
   printInfo s!"Interactive mode (model: {cfg.model})"
   IO.println "Type /help for commands, Ctrl+D to exit.\n"
@@ -114,7 +207,7 @@ partial def run (cfg : Config) : IO Unit := do
 
     -- Handle slash commands
     if input.startsWith "/" then
-      let (newState, shouldExit) ← handleSlashCommand state input.trim
+      let (newState, shouldExit) ← handleSlashCommand state input.trim cfg.autoSave
       stateRef.set newState
       pure shouldExit
     else
