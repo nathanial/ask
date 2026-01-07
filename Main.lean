@@ -8,6 +8,7 @@ import Wisp
 import Chronicle
 import Ask.Repl
 import Ask.History
+import Ask.Error
 
 open Parlance
 open Oracle
@@ -127,8 +128,7 @@ def main (args : List String) : IO UInt32 := do
     IO.println cmd.helpText
     return 0
   | .error e =>
-    printError (ParseError.toString e)
-    return 1
+    return ← Ask.Error.reportFatal none (ParseError.toString e)
   | .ok result =>
     -- List models mode
     if result.hasFlag "list-models" then
@@ -139,8 +139,7 @@ def main (args : List String) : IO UInt32 := do
 
     -- Get API key
     let some apiKey ← IO.getEnv "OPENROUTER_API_KEY"
-      | do printError "OPENROUTER_API_KEY environment variable not set"
-           return 1
+      | return ← Ask.Error.reportFatal none "OPENROUTER_API_KEY environment variable not set"
 
     -- Get model and system prompt
     let model := result.getString! "model" defaultModel
@@ -222,8 +221,7 @@ def main (args : List String) : IO UInt32 := do
           let stdin ← IO.getStdin
           let content ← stdin.readToEnd
           if content.isEmpty then
-            printError "No prompt provided. Use: ask \"your prompt\", pipe to stdin, or use -i for interactive mode"
-            return 1
+            return ← Ask.Error.reportFatal logger "No prompt provided. Use: ask \"your prompt\", pipe to stdin, or use -i for interactive mode"
           pure content.trim
 
       -- Build messages
@@ -240,7 +238,7 @@ def main (args : List String) : IO UInt32 := do
             let _ ← printStreamMarkdown stream wrapWidth
           pure (0 : UInt32)
         | .error e =>
-          printError s!"API error: {e}"
+          Ask.Error.reportError logger s!"API error: {e}"
           pure (1 : UInt32)
 
       if let some l := logger then

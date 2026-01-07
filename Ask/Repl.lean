@@ -7,6 +7,7 @@ import Parlance.Repl
 import Oracle
 import Chronicle
 import Ask.History
+import Ask.Error
 
 namespace Ask.Repl
 
@@ -41,7 +42,8 @@ def helpText : String :=
   "  Ctrl+D            - Exit (on empty line)"
 
 /-- Handle a slash command. Returns (new state, should exit) -/
-def handleSlashCommand (state : State) (cmd : String) (autoSave : Bool := true) : IO (State × Bool) := do
+def handleSlashCommand (state : State) (cmd : String)
+    (logger : Option Chronicle.Logger := none) (autoSave : Bool := true) : IO (State × Bool) := do
   let parts := cmd.splitOn " "
   match parts.head? with
   | some "/quit" | some "/exit" | some "/q" =>
@@ -53,7 +55,7 @@ def handleSlashCommand (state : State) (cmd : String) (autoSave : Bool := true) 
       let path ← History.resolveHistoryPath filename
       match ← History.saveConversation conv path with
       | .ok () => printInfo s!"Auto-saved to: {path}"
-      | .error _ => pure ()  -- Silent failure for auto-save
+      | .error e => Ask.Error.reportWarning logger s!"Auto-save failed: {e}"
     IO.println "Goodbye!"
     pure (state, true)
   | some "/clear" =>
@@ -106,7 +108,7 @@ def handleSlashCommand (state : State) (cmd : String) (autoSave : Bool := true) 
         printSuccess s!"Saved to: {path}"
         pure ({ state with sessionPath := some path }, false)
       | .error e =>
-        printError s!"Save failed: {e}"
+        Ask.Error.reportError logger s!"Save failed: {e}"
         pure (state, false)
 
   | some "/load" =>
@@ -124,7 +126,7 @@ def handleSlashCommand (state : State) (cmd : String) (autoSave : Bool := true) 
           sessionCreatedAt := some conv.metadata.createdAt
         }, false)
       | .error e =>
-        printError s!"Load failed: {e}"
+        Ask.Error.reportError logger s!"Load failed: {e}"
         pure (state, false)
     | none =>
       -- Show available files
@@ -154,7 +156,7 @@ def handleSlashCommand (state : State) (cmd : String) (autoSave : Bool := true) 
     IO.println helpText
     pure (state, false)
   | _ =>
-    printWarning s!"Unknown command: {cmd}. Type /help for commands."
+    Ask.Error.reportWarning logger s!"Unknown command: {cmd}. Type /help for commands."
     pure (state, false)
 
 /-- Configuration for running the REPL -/
@@ -207,7 +209,7 @@ partial def run (cfg : Config) : IO Unit := do
 
     -- Handle slash commands
     if input.startsWith "/" then
-      let (newState, shouldExit) ← handleSlashCommand state input.trim cfg.autoSave
+      let (newState, shouldExit) ← handleSlashCommand state input.trim cfg.logger cfg.autoSave
       stateRef.set newState
       pure shouldExit
     else
@@ -249,7 +251,7 @@ partial def run (cfg : Config) : IO Unit := do
 
         -- Only add non-empty responses to history
         if response.isEmpty then
-          printWarning s!"Received empty response from API (chunks: {chunkCount})"
+          Ask.Error.reportWarning cfg.logger s!"Received empty response from API (chunks: {chunkCount})"
           -- Don't add empty response to history, keep history as-is
           stateRef.set { state with history := newHistory }
         else
@@ -260,9 +262,7 @@ partial def run (cfg : Config) : IO Unit := do
         pure false
 
       | .error e =>
-        if let some l := cfg.logger then
-          l.error s!"API error: {e}"
-        printError s!"API error: {e}"
+        Ask.Error.reportError cfg.logger s!"API error: {e}"
         pure false
 
 end Ask.Repl
